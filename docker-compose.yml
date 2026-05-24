@@ -1,0 +1,33 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      network: host
+    container_name: qobuz-backend
+    restart: unless-stopped
+    network_mode: "host"
+    volumes:
+      # Mount the host qobuz-cli config (read-only)
+      - ${HOME}/.config/qobuz-cli:/root/.config/qobuz-cli:ro
+      # Mount a local downloads directory
+      - ./downloads:/downloads
+      # Mount backend code for hot reloading/real-time updates
+      - ./backend:/app
+    environment:
+      - DOWNLOAD_DIR=/downloads
+      - QOBUZ_CONFIG=/root/.config/qobuz-cli/config.ini
+
+
+  frontend:
+    build:
+      context: .
+      dockerfile: nginx/Dockerfile
+      network: host
+    container_name: qobuz-frontend
+    restart: unless-stopped
+    network_mode: "host"
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend:/usr/share/nginx/html:ro
