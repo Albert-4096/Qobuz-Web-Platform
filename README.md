@@ -11,6 +11,8 @@ A fully self-hosted, containerized web application that wraps `qobuz-cli` inside
 
 ## 📸 Interface Preview & Features
 
+![Qobuz Web Downloader UI](Screenshot.png)
+
 - **✨ Modern Glassmorphism UI**: Beautiful, dark-themed responsive design tailored for desktops and mobile screens.
 - **🔍 Seamless Search**: Browse through Qobuz's vast library for tracks, albums, and artists.
 - **📥 One-Click Downloads**: Choose your preferred audio quality (from 320kbps MP3 all the way up to Hi-Res+ 24-bit/192kHz FLAC) and start downloads directly from the browser.
