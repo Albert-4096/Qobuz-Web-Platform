@@ -28,7 +28,7 @@ The system runs entirely inside a Docker Compose stack. It isolates the Python b
 ```mermaid
 flowchart TD
     subgraph Host Machine
-        Downloads[("./downloads (Local Audio Library)")]
+        Downloads[("MUSIC_DIR (e.g. /media/Jellyfin/Music)")]
         Config[("~/.config/qobuz-cli (Credentials & API Tokens)")]
     end
 
@@ -55,7 +55,23 @@ flowchart TD
 
 ---
 
-### 🔑 Step 1: Configure Qobuz Credentials (No Host CLI Required!)
+### ⚙️ Step 1: Configure Environment Variables
+
+Create a `.env` file in the project root (it is gitignored by default):
+
+```env
+# Absolute path on the host where music will be saved (e.g. your Music library)
+MUSIC_DIR=/media/music/
+
+# Port the web UI will be accessible on
+APP_PORT=8085
+```
+
+Adjust `MUSIC_DIR` to match your media library path and `APP_PORT` to any free port on your host.
+
+---
+
+### 🔑 Step 2: Configure Qobuz Credentials (No Host CLI Required!)
 
 Since this service interacts with the Qobuz API, it needs authentication tokens. You can securely initialize these directly through the Docker container without installing Python or `qobuz-cli` on your host.
 
@@ -76,7 +92,7 @@ Since this service interacts with the Qobuz API, it needs authentication tokens.
 
 ---
 
-### 🐳 Step 2: Spin Up the Stack
+### 🐳 Step 3: Spin Up the Stack
 
 With credentials initialized, start the services in detached mode:
 
@@ -86,7 +102,7 @@ docker compose up -d --build
 
 ---
 
-### 🌐 Step 3: Access the Application
+### 🌐 Step 4: Access the Application
 
 Once the containers are running:
 1. Open your web browser and go to: **[http://localhost:8085](http://localhost:8085)**
@@ -96,29 +112,29 @@ Once the containers are running:
 
 ## 📁 Downloads & File Structure
 
-By default, downloads are saved to the `./downloads` folder inside this project directory. The folder is structured as follows:
+Downloads are saved to the host path defined by `MUSIC_DIR` in your `.env` file (default: `/media/music`). The folder is structured as follows:
 ```text
-downloads/
+$MUSIC_DIR/
 └── Artist Name/
     └── Album Name/
         ├── 01 - Track Title.flac
         ├── 02 - Track Title.flac
         └── folder.jpg (Album Art)
 ```
-You can point your Plex, Jellyfin, or local media server directly to this `./downloads` folder.
+Point your Jellyfin or Plex music library directly at the `MUSIC_DIR` path.
 
 ---
 
-## 🛠️ Configuration & Port Customization
+## 🛠️ Configuration
 
-If you need to change ports or customize paths, edit the `docker-compose.yml` file:
+All runtime settings are controlled via the `.env` file in the project root:
 
-- **Web Port**: To change the web UI port from `8085` to something else (e.g., `9000`), modify the ports binding in the frontend section or Nginx settings.
-- **Storage Location**: To save downloads to an external hard drive, change the left side of the downloads volume mount:
-  ```yaml
-  volumes:
-    - /path/to/your/music:/downloads
-  ```
+| Variable | Default | Description |
+|---|---|---|
+| `MUSIC_DIR` | `/media/music` | Host path where downloads are saved |
+| `APP_PORT` | `8085` | Port the web UI is exposed on |
+
+Edit `.env` and restart the stack (`docker compose up -d`) for changes to take effect.
 
 ---
 

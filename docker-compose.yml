@@ -3,15 +3,15 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-      network: host
     container_name: qobuz-backend
     restart: unless-stopped
-    network_mode: "host"
+    networks:
+      - qobuz_net
     volumes:
       # Mount the host qobuz-cli config (read-only)
       - ${HOME}/.config/qobuz-cli:/root/.config/qobuz-cli:ro
-      # Mount a local downloads directory
-      - ./downloads:/downloads
+      # Downloads go to the path defined in .env (MUSIC_DIR)
+      - ${MUSIC_DIR}:/downloads
       # Mount backend code for hot reloading/real-time updates
       - ./backend:/app
     environment:
@@ -23,11 +23,16 @@ services:
     build:
       context: .
       dockerfile: nginx/Dockerfile
-      network: host
     container_name: qobuz-frontend
     restart: unless-stopped
-    network_mode: "host"
+    ports:
+      - "${APP_PORT}:8085"
     depends_on:
       - backend
     volumes:
       - ./frontend:/usr/share/nginx/html:ro
+    networks:
+      - qobuz_net
+
+networks:
+  qobuz_net:
