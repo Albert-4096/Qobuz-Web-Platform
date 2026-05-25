@@ -1,71 +1,111 @@
+import asyncio
 import os
-import sys
 import logging
-from typing import Optional
 import httpx
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import Response
 import uvicorn
 
-# Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("qobuz-mcp-server")
 
-# Base API URL configuration
-# Default to backend:8000 since we run inside the Docker Compose network
 API_URL = os.environ.get("QOBUZ_API_URL", "http://backend:8000/api").rstrip("/")
+BACKEND_USERNAME = os.environ.get("APP_USERNAME", "")
+BACKEND_PASSWORD = os.environ.get("APP_PASSWORD", "")
+
+_jwt_token: str | None = None
+_token_lock: asyncio.Lock | None = None
+
+
+def _get_lock() -> asyncio.Lock:
+    global _token_lock
+    if _token_lock is None:
+        _token_lock = asyncio.Lock()
+    return _token_lock
+
+
+async def _refresh_token() -> str | None:
+    global _jwt_token
+    _jwt_token = None
+    if not BACKEND_USERNAME or not BACKEND_PASSWORD:
+        logger.warning("APP_USERNAME/APP_PASSWORD not set — backend requests will be unauthenticated.")
+        return None
+    async with httpx.AsyncClient(base_url=API_URL, timeout=10.0) as client:
+        try:
+            resp = await client.post(
+                "/auth/login",
+                json={"username": BACKEND_USERNAME, "password": BACKEND_PASSWORD},
+            )
+            resp.raise_for_status()
+            _jwt_token = resp.json().get("token")
+            logger.info("Authenticated with backend API.")
+        except Exception as e:
+            logger.error(f"Backend auth failed: {e}")
+    return _jwt_token
+
+
+async def _get_token() -> str | None:
+    global _jwt_token
+    if _jwt_token:
+        return _jwt_token
+    async with _get_lock():
+        if _jwt_token:
+            return _jwt_token
+        return await _refresh_token()
+
 
 # ---------------------------------------------------------------------------
-# Transport Security Settings (DNS rebinding protection)
+# DNS rebinding protection (optional, configured via ALLOWED_HOSTS env var)
 # ---------------------------------------------------------------------------
-# ALLOWED_HOSTS: comma-separated list of Host header values to allow.
-# When behind a reverse proxy (e.g. NGINX), add the public domain here so
-# MCP 1.27+ DNS-rebinding protection doesn't reject requests with 421.
-# Example: ALLOWED_HOSTS=qobuz-mcp.alberyt.xyz,localhost:8086
-_allowed_hosts_env = os.environ.get("ALLOWED_HOSTS", "")
-_allowed_hosts = [h.strip() for h in _allowed_hosts_env.split(",") if h.strip()]
-
+_raw_hosts = os.environ.get("ALLOWED_HOSTS", "")
+_allowed_hosts = [h.strip() for h in _raw_hosts.split(",") if h.strip()]
 if _allowed_hosts:
     _transport_security = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=_allowed_hosts,
     )
-    logger.info(f"DNS rebinding protection ENABLED. Allowed hosts: {_allowed_hosts}")
+    logger.info(f"DNS rebinding protection enabled. Allowed hosts: {_allowed_hosts}")
 else:
     _transport_security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
-    logger.warning("ALLOWED_HOSTS not set — DNS rebinding protection DISABLED.")
+    logger.warning("ALLOWED_HOSTS not set — DNS rebinding protection disabled.")
 
-# Initialize MCP Server
-mcp = FastMCP(
-    "Qobuz Downloader",
-    transport_security=_transport_security,
-)
+mcp = FastMCP("Qobuz Downloader", transport_security=_transport_security)
 
-# Helper function to get httpx async client with base url
+
+# ---------------------------------------------------------------------------
+# Backend API helper
+# ---------------------------------------------------------------------------
 def get_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(base_url=API_URL, timeout=30.0)
 
+
 async def handle_api_request(method: str, path: str, **kwargs) -> dict:
-    """Helper to perform HTTP requests to the backend API with error handling."""
+    """Perform HTTP requests to the backend API with JWT auth and error handling."""
+    token = await _get_token()
+    headers = dict(kwargs.pop("headers", {}))
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
     async with get_client() as client:
         try:
-            response = await client.request(method, path, **kwargs)
+            response = await client.request(method, path, headers=headers, **kwargs)
+
+            # Refresh once on 401 and retry
+            if response.status_code == 401 and token:
+                new_token = await _refresh_token()
+                if new_token:
+                    headers["Authorization"] = f"Bearer {new_token}"
+                    response = await client.request(method, path, headers=headers, **kwargs)
+
             if response.status_code == 404:
                 return {"error": f"Resource not found at {path}"}
             response.raise_for_status()
             return response.json()
         except httpx.ConnectError:
-            logger.error(f"Could not connect to Qobuz Web Downloader service backend at {API_URL}.")
-            return {
-                "error": (
-                    f"Could not connect to Qobuz service backend at {API_URL}. "
-                    "Please ensure the backend container is running."
-                )
-            }
+            logger.error(f"Could not connect to backend at {API_URL}.")
+            return {"error": f"Could not connect to backend at {API_URL}. Is the backend container running?"}
         except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP error occurred: {e.response.text}")
+            logger.error(f"HTTP error: {e.response.text}")
             try:
                 detail = e.response.json().get("detail", e.response.text)
             except Exception:
@@ -74,6 +114,7 @@ async def handle_api_request(method: str, path: str, **kwargs) -> dict:
         except Exception as e:
             logger.exception("Unexpected error in API request")
             return {"error": f"Unexpected error: {str(e)}"}
+
 
 # ---------------------------------------------------------------------------
 # Tool: Search Qobuz
@@ -91,9 +132,7 @@ async def search_qobuz(query: str, media_type: str = "tracks", limit: int = 15) 
     if media_type not in ("tracks", "albums", "artists"):
         return "Error: media_type must be one of: 'tracks', 'albums', or 'artists'."
 
-    params = {"q": query, "type": media_type, "limit": limit}
-    data = await handle_api_request("GET", "/search", params=params)
-
+    data = await handle_api_request("GET", "/search", params={"q": query, "type": media_type, "limit": limit})
     if "error" in data:
         return data["error"]
 
@@ -102,7 +141,6 @@ async def search_qobuz(query: str, media_type: str = "tracks", limit: int = 15) 
         items = data.get("tracks", {}).get("items", [])
         if not items:
             return f"No tracks found matching query '{query}'."
-
         results.append(f"### Track Search Results for '{query}'\n")
         results.append("| ID | Track Title | Artist | Album | Duration | Max Quality |")
         results.append("| --- | --- | --- | --- | --- | --- |")
@@ -113,18 +151,15 @@ async def search_qobuz(query: str, media_type: str = "tracks", limit: int = 15) 
             album = item.get("album", {}).get("title", "Unknown")
             duration_s = item.get("duration", 0)
             duration = f"{duration_s // 60}:{duration_s % 60:02d}"
-            
             bit_depth = item.get("maximum_bit_depth", 16)
             sample_rate = item.get("maximum_sampling_rate", 44.1)
             quality = f"Hi-Res ({bit_depth}-bit/{sample_rate}kHz)" if bit_depth > 16 else "CD Quality"
-            
             results.append(f"| `{track_id}` | **{title}** | {artist} | *{album}* | {duration} | {quality} |")
 
     elif media_type == "albums":
         items = data.get("albums", {}).get("items", [])
         if not items:
             return f"No albums found matching query '{query}'."
-
         results.append(f"### Album Search Results for '{query}'\n")
         results.append("| ID | Album Title | Artist | Tracks | Released | Max Quality |")
         results.append("| --- | --- | --- | --- | --- | --- |")
@@ -133,26 +168,21 @@ async def search_qobuz(query: str, media_type: str = "tracks", limit: int = 15) 
             title = item.get("title", "Unknown")
             artist = item.get("artist", {}).get("name", "Unknown")
             tracks_count = item.get("tracks_count", 0)
-            
-            # Format release year
             released_at = item.get("released_at", 0)
             try:
                 from datetime import datetime
                 year = datetime.fromtimestamp(released_at).year if released_at else "N/A"
             except Exception:
                 year = "N/A"
-                
             bit_depth = item.get("maximum_bit_depth", 16)
             sample_rate = item.get("maximum_sampling_rate", 44.1)
             quality = f"Hi-Res ({bit_depth}-bit/{sample_rate}kHz)" if bit_depth > 16 else "CD Quality"
-            
             results.append(f"| `{album_id}` | **{title}** | {artist} | {tracks_count} | {year} | {quality} |")
 
     elif media_type == "artists":
         items = data.get("artists", {}).get("items", [])
         if not items:
             return f"No artists found matching query '{query}'."
-
         results.append(f"### Artist Search Results for '{query}'\n")
         results.append("| ID | Artist Name | Albums Count |")
         results.append("| --- | --- | --- |")
@@ -163,6 +193,7 @@ async def search_qobuz(query: str, media_type: str = "tracks", limit: int = 15) 
             results.append(f"| `{artist_id}` | **{name}** | {albums_count} |")
 
     return "\n".join(results)
+
 
 # ---------------------------------------------------------------------------
 # Tool: Get Album Details
@@ -184,11 +215,10 @@ async def get_album_details(album_id: str) -> str:
     tracks_count = data.get("tracks_count", 0)
     upc = data.get("upc", "N/A")
     label = data.get("label", {}).get("name", "Unknown")
-    
     bit_depth = data.get("maximum_bit_depth", 16)
     sample_rate = data.get("maximum_sampling_rate", 44.1)
     quality = f"Hi-Res ({bit_depth}-bit/{sample_rate}kHz)" if bit_depth > 16 else "CD Quality"
-    
+
     results = [
         f"## Album Details: **{title}** by **{artist}**\n",
         f"- **Album ID:** `{album_id}` (UPC: {upc})",
@@ -197,11 +227,10 @@ async def get_album_details(album_id: str) -> str:
         f"- **Tracks:** {tracks_count}\n",
         "### Track List",
         "| # | Track Title | Track ID | Duration | Streamable | Downloadable |",
-        "| --- | --- | --- | --- | --- | --- |"
+        "| --- | --- | --- | --- | --- | --- |",
     ]
-    
-    tracks_data = data.get("tracks", {}).get("items", [])
-    for track in tracks_data:
+
+    for track in data.get("tracks", {}).get("items", []):
         num = track.get("track_number", 0)
         t_title = track.get("title", "Unknown")
         t_id = track.get("id")
@@ -209,10 +238,10 @@ async def get_album_details(album_id: str) -> str:
         t_duration = f"{t_duration_s // 60}:{t_duration_s % 60:02d}"
         streamable = "Yes" if track.get("streamable", False) else "No"
         downloadable = "Yes" if track.get("downloadable", False) else "No"
-        
         results.append(f"| {num} | {t_title} | `{t_id}` | {t_duration} | {streamable} | {downloadable} |")
 
     return "\n".join(results)
+
 
 # ---------------------------------------------------------------------------
 # Tool: Get Track Details
@@ -238,17 +267,17 @@ async def get_track_details(track_id: str) -> str:
     duration = f"{duration_s // 60}:{duration_s % 60:02d}"
     isrc = data.get("isrc", "N/A")
     downloadable = "Yes" if data.get("downloadable", False) else "No"
-    
-    results = [
+
+    return "\n".join([
         f"## Track Details: **{title}**\n",
         f"- **Artist:** {artist}",
         f"- **Album:** *{album}* (Album ID: `{album_id}`)",
         f"- **Track Number:** {track_number}",
         f"- **Duration:** {duration}",
         f"- **Track ID:** `{track_id}` (ISRC: {isrc})",
-        f"- **Downloadable:** {downloadable}"
-    ]
-    return "\n".join(results)
+        f"- **Downloadable:** {downloadable}",
+    ])
+
 
 # ---------------------------------------------------------------------------
 # Tool: Download Music
@@ -266,22 +295,18 @@ async def download_music(url_or_id: str, item_type: str = "album", quality: int 
                  2 = CD (16-bit / 44.1 kHz)
                  3 = Hi-Res (24-bit / 96 kHz)
                  4 = Hi-Res+ (24-bit / 192 kHz) - Default.
-                 It automatically falls back to the maximum quality available for the item if higher.
+                 Automatically falls back to the maximum available quality if the requested level is too high.
     """
     if quality not in (1, 2, 3, 4):
         return "Error: quality must be an integer between 1 and 4."
 
     url = url_or_id.strip()
-    
-    # If not a URL, construct it using play.qobuz.com
     if not (url.startswith("http://") or url.startswith("https://")):
         if item_type not in ("album", "track"):
             return "Error: item_type must be either 'album' or 'track' when providing a raw ID."
         url = f"https://play.qobuz.com/{item_type}/{url}"
 
-    payload = {"url": url, "quality": quality}
-    data = await handle_api_request("POST", "/download", json=payload)
-
+    data = await handle_api_request("POST", "/download", json={"url": url, "quality": quality})
     if "error" in data:
         return data["error"]
 
@@ -289,24 +314,18 @@ async def download_music(url_or_id: str, item_type: str = "album", quality: int 
     status = data.get("status")
     title = data.get("title", "Initiating...")
     q_label = data.get("quality_label", "")
-
-    quality_names = {
-        1: "MP3 320kbps",
-        2: "CD Quality",
-        3: "Hi-Res (24/96)",
-        4: "Hi-Res+ (24/192)",
-    }
-    req_quality = quality_names.get(quality, "Highest")
+    quality_names = {1: "MP3 320kbps", 2: "CD Quality", 3: "Hi-Res (24/96)", 4: "Hi-Res+ (24/192)"}
 
     return (
         f"### Download Queued Successfully!\n"
         f"- **Download ID:** `{dl_id}`\n"
-        f"- **URL Queue:** {url}\n"
+        f"- **URL Queued:** {url}\n"
         f"- **Target Item:** {title}\n"
-        f"- **Requested Quality:** {req_quality} ({q_label})\n"
+        f"- **Requested Quality:** {quality_names.get(quality, 'Highest')} ({q_label})\n"
         f"- **Status:** {status}\n\n"
-        f"You can monitor the progress by calling `list_downloads` or `get_download_status(download_id=\"{dl_id}\")`."
+        f"Monitor progress with `list_downloads` or `get_download_status(download_id=\"{dl_id}\")`."
     )
+
 
 # ---------------------------------------------------------------------------
 # Tool: List Downloads
@@ -325,34 +344,30 @@ async def list_downloads() -> str:
     results = [
         "## Recent & Active Downloads\n",
         "| ID | Title / URL | Status | Progress | Quality | Error |",
-        "| --- | --- | --- | --- | --- | --- |"
+        "| --- | --- | --- | --- | --- | --- |",
     ]
+
+    status_labels = {
+        "completed": "✅ Completed",
+        "failed": "❌ Failed",
+        "downloading": "⏳ Downloading",
+        "pending": "⏱️ Pending",
+    }
 
     for dl in downloads:
         dl_id = dl.get("id")
         title = dl.get("title") or dl.get("url") or "Unknown"
-        # truncate title if too long
         if len(title) > 50:
             title = title[:47] + "..."
-            
         status = dl.get("status", "unknown")
+        status_str = status_labels.get(status, status.upper())
         progress = f"{int(dl.get('progress', 0))}%"
         quality = dl.get("quality_label", "Unknown")
         err = dl.get("error") or ""
-        
-        status_str = status.upper()
-        if status == "completed":
-            status_str = "✅ Completed"
-        elif status == "failed":
-            status_str = "❌ Failed"
-        elif status == "downloading":
-            status_str = "⏳ Downloading"
-        elif status == "pending":
-            status_str = "⏱️ Pending"
-
         results.append(f"| `{dl_id}` | {title} | {status_str} | {progress} | {quality} | {err} |")
 
     return "\n".join(results)
+
 
 # ---------------------------------------------------------------------------
 # Tool: Get Download Status
@@ -388,18 +403,18 @@ async def get_download_status(download_id: str) -> str:
         f"- **Progress:** {progress}",
         f"- **Quality Mode:** {quality}",
         f"- **Created At:** {created}",
-        f"- **Completed At:** {completed}"
+        f"- **Completed At:** {completed}",
     ]
 
     if err:
         results.append(f"- **Error Details:** {err}")
-
     if files:
         results.append("\n### Downloaded Files:")
         for f in files:
             results.append(f"- `{f}`")
 
     return "\n".join(results)
+
 
 # ---------------------------------------------------------------------------
 # Tool: Cancel Download
@@ -415,8 +430,8 @@ async def cancel_download(download_id: str) -> str:
     data = await handle_api_request("DELETE", f"/downloads/{download_id}")
     if "error" in data:
         return data["error"]
-
     return f"Download `{download_id}` has been cancelled successfully."
+
 
 # ---------------------------------------------------------------------------
 # Tool: Browse Library
@@ -432,29 +447,18 @@ async def list_library() -> str:
     if not files:
         return "The library is currently empty. Start downloading some music!"
 
-    library_tree = {}
+    library_tree: dict = {}
     for file_info in files:
         path = file_info.get("path", "")
         parts = path.split("/")
         if len(parts) >= 3:
-            artist = parts[0]
-            album = parts[1]
-            track = "/".join(parts[2:])
+            artist, album, track = parts[0], parts[1], "/".join(parts[2:])
         elif len(parts) == 2:
-            artist = parts[0]
-            album = "Single/Unsorted"
-            track = parts[1]
+            artist, album, track = parts[0], "Single/Unsorted", parts[1]
         else:
-            artist = "Unsorted"
-            album = "Unsorted"
-            track = path
+            artist, album, track = "Unsorted", "Unsorted", path
 
-        if artist not in library_tree:
-            library_tree[artist] = {}
-        if album not in library_tree[artist]:
-            library_tree[artist][album] = []
-        
-        library_tree[artist][album].append(track)
+        library_tree.setdefault(artist, {}).setdefault(album, []).append(track)
 
     results = ["## Downloaded Library Music\n"]
     for artist, albums in sorted(library_tree.items()):
@@ -467,69 +471,96 @@ async def list_library() -> str:
 
     return "\n".join(results)
 
-# ---------------------------------------------------------------------------
-# Token Authentication Middleware
-# ---------------------------------------------------------------------------
-class TokenAuthMiddleware(BaseHTTPMiddleware):
-    """Starlette middleware to require a secret token for all requests."""
 
+# ---------------------------------------------------------------------------
+# Bearer token ASGI middleware
+# Compatible with both SSE and StreamableHTTP transports.
+# Uses raw ASGI interface (not BaseHTTPMiddleware) to avoid buffering issues.
+# ---------------------------------------------------------------------------
+class TokenAuthMiddleware:
     def __init__(self, app, token: str):
-        super().__init__(app)
+        self.app = app
         self.token = token
 
-    async def dispatch(self, request, call_next):
-        # Allow OPTIONS request (CORS)
-        if request.method == "OPTIONS":
-            return await call_next(request)
+    async def __call__(self, scope, receive, send):
+        if scope["type"] not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
 
-        # Allow simple health check endpoint without token
-        if request.url.path in ("/health", "/"):
-            return await call_next(request)
+        path = scope.get("path", "")
+        method = scope.get("method", "")
 
-        # Retrieve token from headers or query params
-        auth_header = request.headers.get("authorization")
-        req_token = None
+        # Health check served directly — no auth required
+        if path == "/health":
+            body = b"OK"
+            await send({
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"text/plain"), (b"content-length", b"2")],
+            })
+            await send({"type": "http.response.body", "body": body, "more_body": False})
+            return
 
-        if auth_header:
-            if auth_header.lower().startswith("bearer "):
-                req_token = auth_header[7:]
-            else:
-                req_token = auth_header
+        # Pass CORS preflight through untouched
+        if method == "OPTIONS":
+            await self.app(scope, receive, send)
+            return
+
+        # Extract bearer token from Authorization header, X-MCP-Token header, or query param
+        headers = dict(scope.get("headers", []))
+        auth = headers.get(b"authorization", b"").decode()
+        if auth.lower().startswith("bearer "):
+            req_token: str | None = auth[7:].strip()
         else:
-            # Fallback to custom header or query param
-            req_token = request.headers.get("x-mcp-token") or request.query_params.get("token")
+            req_token = headers.get(b"x-mcp-token", b"").decode() or None
+
+        if not req_token:
+            for part in scope.get("query_string", b"").decode().split("&"):
+                if part.startswith("token="):
+                    req_token = part[6:]
+                    break
 
         if not req_token or req_token != self.token:
-            logger.warning(f"Unauthorized access attempt from {request.client.host if request.client else 'unknown'}")
-            return Response("Unauthorized: Invalid or missing token", status_code=401)
+            client = scope.get("client") or ("unknown", 0)
+            logger.warning(f"Unauthorized request from {client[0]}: {method} {path}")
+            body = b"401 Unauthorized: Invalid or missing bearer token"
+            await send({
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [
+                    (b"content-type", b"text/plain"),
+                    (b"content-length", str(len(body)).encode()),
+                ],
+            })
+            await send({"type": "http.response.body", "body": body, "more_body": False})
+            return
 
-        return await call_next(request)
+        await self.app(scope, receive, send)
+
 
 # ---------------------------------------------------------------------------
-# Main Entry Point
+# Entry point
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    token = os.environ.get("MCP_TOKEN")
+    mcp_token = os.environ.get("MCP_TOKEN", "").strip()
     port = int(os.environ.get("PORT", "8086"))
     host = os.environ.get("HOST", "0.0.0.0")
-    # FastMCP uses Starlette under the hood for SSE
-    app = mcp.sse_app()
 
-    # Wrap the app with token auth middleware if set
-    if token:
-        app.add_middleware(TokenAuthMiddleware, token=token.strip())
-        logger.info(f"MCP Server token authentication ENABLED (Token length: {len(token)})")
+    # StreamableHTTP is the modern MCP transport (POST + GET /mcp).
+    # It is stateless-capable, avoids SSE session-ID fragility, and is
+    # supported by all MCP 1.x clients including Claude Code.
+    app = mcp.streamable_http_app()
+
+    if mcp_token:
+        app = TokenAuthMiddleware(app, token=mcp_token)
+        logger.info(f"Bearer auth enabled (token length: {len(mcp_token)})")
     else:
-        logger.warning("MCP Server token authentication DISABLED! Specify MCP_TOKEN env variable.")
+        logger.warning("MCP_TOKEN not set — auth disabled!")
 
-    # Simple health check endpoint on the root app
-    async def health_check(request):
-        return Response("OK", status_code=200)
+    logger.info(f"Starting Qobuz MCP (StreamableHTTP) on {host}:{port}")
+    logger.info(f"MCP endpoint: http://{host}:{port}/mcp")
+    logger.info(f"Health check: http://{host}:{port}/health")
 
-    app.add_route("/health", health_check)
-
-    # Start the server using uvicorn
-    # proxy_headers=True + forwarded_allow_ips="*" ensures uvicorn trusts the
-    # Host / X-Forwarded-* headers set by NGINX, preventing 421 errors.
-    logger.info(f"Starting Qobuz MCP SSE server on {host}:{port}")
+    # proxy_headers=True ensures uvicorn trusts X-Forwarded-* from nginx,
+    # which prevents 421 responses when behind the reverse proxy.
     uvicorn.run(app, host=host, port=port, proxy_headers=True, forwarded_allow_ips="*")

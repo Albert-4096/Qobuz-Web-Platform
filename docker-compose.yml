@@ -55,6 +55,8 @@ services:
       - MCP_TOKEN=${MCP_TOKEN}
       - PORT=8086
       - ALLOWED_HOSTS=${ALLOWED_HOSTS:-}
+      - APP_USERNAME=${APP_USERNAME:-}
+      - APP_PASSWORD=${APP_PASSWORD:-}
     networks:
       - qobuz_net
 
