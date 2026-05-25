@@ -17,9 +17,30 @@ logger = logging.getLogger("qobuz-mcp-server")
 # Default to backend:8000 since we run inside the Docker Compose network
 API_URL = os.environ.get("QOBUZ_API_URL", "http://backend:8000/api").rstrip("/")
 
+# ---------------------------------------------------------------------------
+# Transport Security Settings (DNS rebinding protection)
+# ---------------------------------------------------------------------------
+# ALLOWED_HOSTS: comma-separated list of Host header values to allow.
+# When behind a reverse proxy (e.g. NGINX), add the public domain here so
+# MCP 1.27+ DNS-rebinding protection doesn't reject requests with 421.
+# Example: ALLOWED_HOSTS=qobuz-mcp.alberyt.xyz,localhost:8086
+_allowed_hosts_env = os.environ.get("ALLOWED_HOSTS", "")
+_allowed_hosts = [h.strip() for h in _allowed_hosts_env.split(",") if h.strip()]
+
+if _allowed_hosts:
+    _transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=_allowed_hosts,
+    )
+    logger.info(f"DNS rebinding protection ENABLED. Allowed hosts: {_allowed_hosts}")
+else:
+    _transport_security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
+    logger.warning("ALLOWED_HOSTS not set — DNS rebinding protection DISABLED.")
+
 # Initialize MCP Server
 mcp = FastMCP(
     "Qobuz Downloader",
+    transport_security=_transport_security,
 )
 
 # Helper function to get httpx async client with base url
@@ -491,27 +512,8 @@ if __name__ == "__main__":
     token = os.environ.get("MCP_TOKEN")
     port = int(os.environ.get("PORT", "8086"))
     host = os.environ.get("HOST", "0.0.0.0")
-
-    # ALLOWED_HOSTS: comma-separated list of Host header values to allow.
-    # When behind a reverse proxy (e.g. NGINX), add the public domain here so
-    # MCP 1.27+ DNS-rebinding protection doesn't reject the request with 421.
-    # Example: ALLOWED_HOSTS=qobuz-mcp.alberyt.xyz,localhost:8086
-    allowed_hosts_env = os.environ.get("ALLOWED_HOSTS", "")
-    allowed_hosts = [h.strip() for h in allowed_hosts_env.split(",") if h.strip()]
-
-    if allowed_hosts:
-        security_settings = TransportSecuritySettings(
-            enable_dns_rebinding_protection=True,
-            allowed_hosts=allowed_hosts,
-        )
-        logger.info(f"DNS rebinding protection ENABLED. Allowed hosts: {allowed_hosts}")
-    else:
-        # Disable DNS rebinding protection if no hosts configured (backwards compat)
-        security_settings = TransportSecuritySettings(enable_dns_rebinding_protection=False)
-        logger.warning("ALLOWED_HOSTS not set — DNS rebinding protection DISABLED.")
-
     # FastMCP uses Starlette under the hood for SSE
-    app = mcp.sse_app(security_settings=security_settings)
+    app = mcp.sse_app()
 
     # Wrap the app with token auth middleware if set
     if token:
