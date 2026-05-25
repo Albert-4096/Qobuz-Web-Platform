@@ -48,6 +48,7 @@ services:
       - QOBUZ_API_URL=http://backend:8000/api
       - MCP_TOKEN=${MCP_TOKEN}
       - PORT=8086
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS:-}
     networks:
       - qobuz_net
 

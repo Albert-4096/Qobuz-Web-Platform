@@ -4,6 +4,7 @@ import logging
 from typing import Optional
 import httpx
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 import uvicorn
@@ -491,8 +492,26 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8086"))
     host = os.environ.get("HOST", "0.0.0.0")
 
+    # ALLOWED_HOSTS: comma-separated list of Host header values to allow.
+    # When behind a reverse proxy (e.g. NGINX), add the public domain here so
+    # MCP 1.27+ DNS-rebinding protection doesn't reject the request with 421.
+    # Example: ALLOWED_HOSTS=qobuz-mcp.alberyt.xyz,localhost:8086
+    allowed_hosts_env = os.environ.get("ALLOWED_HOSTS", "")
+    allowed_hosts = [h.strip() for h in allowed_hosts_env.split(",") if h.strip()]
+
+    if allowed_hosts:
+        security_settings = TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=allowed_hosts,
+        )
+        logger.info(f"DNS rebinding protection ENABLED. Allowed hosts: {allowed_hosts}")
+    else:
+        # Disable DNS rebinding protection if no hosts configured (backwards compat)
+        security_settings = TransportSecuritySettings(enable_dns_rebinding_protection=False)
+        logger.warning("ALLOWED_HOSTS not set — DNS rebinding protection DISABLED.")
+
     # FastMCP uses Starlette under the hood for SSE
-    app = mcp.sse_app()
+    app = mcp.sse_app(security_settings=security_settings)
 
     # Wrap the app with token auth middleware if set
     if token:
