@@ -20,6 +20,9 @@ services:
     environment:
       - DOWNLOAD_DIR=/downloads
       - QOBUZ_CONFIG=/root/.config/qobuz-cli/config.ini
+      - APP_USERNAME=${APP_USERNAME:-}
+      - APP_PASSWORD=${APP_PASSWORD:-}
+      - JWT_SECRET=${JWT_SECRET:-}
 
 
   frontend:

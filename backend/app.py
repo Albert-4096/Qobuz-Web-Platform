@@ -12,14 +12,15 @@ import logging
 import os
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from jose import JWTError, jwt
 from pydantic import BaseModel
 
 # ---------------------------------------------------------------------------
@@ -52,6 +53,25 @@ QUALITY_LABELS = {
     3: "Hi-Res (24-bit/96kHz)",
     4: "Hi-Res+ (24-bit/192kHz)",
 }
+
+# ---------------------------------------------------------------------------
+# Auth configuration
+# ---------------------------------------------------------------------------
+
+APP_USERNAME = os.environ.get("APP_USERNAME", "")
+APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
+JWT_SECRET = os.environ.get("JWT_SECRET", "")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRE_DAYS = 30
+
+AUTH_ENABLED = bool(APP_USERNAME and APP_PASSWORD and JWT_SECRET)
+
+_PUBLIC_PATHS = {"/api/auth/login", "/api/auth/status", "/api/health", "/health"}
+
+
+def _create_token() -> str:
+    expire = datetime.now(timezone.utc) + timedelta(days=JWT_EXPIRE_DAYS)
+    return jwt.encode({"sub": APP_USERNAME, "exp": expire}, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +342,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    if not AUTH_ENABLED or request.url.path in _PUBLIC_PATHS:
+        return await call_next(request)
+
+    token: str | None = None
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+    else:
+        # Allow token as query param for file serving / audio streaming
+        token = request.query_params.get("token")
+
+    if not token:
+        return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
+
+    try:
+        jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except JWTError:
+        return JSONResponse(status_code=401, content={"detail": "Invalid or expired token"})
+
+    return await call_next(request)
+
 # Globals initialized on startup
 qobuz_api: QobuzAPI | None = None
 download_manager: DownloadManager | None = None
@@ -351,6 +395,27 @@ async def shutdown() -> None:
 @app.get("/api/health")
 async def health() -> dict:
     return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
+
+
+# --- Auth ---
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+@app.get("/api/auth/status")
+async def auth_status() -> dict:
+    return {"auth_enabled": AUTH_ENABLED}
+
+
+@app.post("/api/auth/login")
+async def login(req: LoginRequest) -> dict:
+    if not AUTH_ENABLED:
+        raise HTTPException(status_code=503, detail="Authentication not configured")
+    if req.username != APP_USERNAME or req.password != APP_PASSWORD:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    return {"token": _create_token(), "username": APP_USERNAME}
 
 
 # --- Search ---

@@ -10,6 +10,7 @@
   const DEBOUNCE_MS = 300;
   const POLL_MS = 2000;
   const MAX_HISTORY = 8;
+  const TOKEN_KEY = 'qobuz_auth_token';
   const QUALITY_OPTIONS = [
     { id: 1, label: 'MP3 320',  detail: '320 kbps',     cssClass: 'quality-mp3' },
     { id: 2, label: 'CD',       detail: '16-bit / 44.1 kHz', cssClass: 'quality-cd' },
@@ -23,6 +24,7 @@
   let searchTimer = null;
   let pollTimer = null;
   let activeDropdown = null;
+  let authEnabled = false;
 
   // --------------- DOM Refs ---------------
   const $ = (sel, ctx = document) => ctx.querySelector(sel);
@@ -39,6 +41,18 @@
   const libraryEmpty = $('#library-empty');
   const searchHistory = $('#search-history');
   const toastContainer = $('#toast-container');
+
+  // Auth refs
+  const authOverlay = $('#auth-overlay');
+  const authForm = $('#auth-form');
+  const authUsername = $('#auth-username');
+  const authPassword = $('#auth-password');
+  const authError = $('#auth-error');
+  const authSubmit = $('#auth-submit');
+  const authSubmitText = $('#auth-submit-text');
+  const authSubmitSpinner = $('#auth-submit-spinner');
+  const authPwToggle = $('#auth-pw-toggle');
+  const logoutBtn = $('#logout-btn');
 
   // Audio player refs
   const audioEl = $('#audio-player');
@@ -94,6 +108,124 @@
   function qobuzAlbumUrl(albumId) {
     return `https://play.qobuz.com/album/${albumId}`;
   }
+
+  // --------------- Auth ---------------
+  function getToken() {
+    return localStorage.getItem(TOKEN_KEY);
+  }
+
+  function setToken(token) {
+    localStorage.setItem(TOKEN_KEY, token);
+  }
+
+  function clearToken() {
+    localStorage.removeItem(TOKEN_KEY);
+  }
+
+  function isTokenExpired(token) {
+    try {
+      const payload = JSON.parse(atob(token.split('.')[1]));
+      return payload.exp < Date.now() / 1000;
+    } catch {
+      return true;
+    }
+  }
+
+  function authHeaders() {
+    const token = getToken();
+    return token ? { 'Authorization': `Bearer ${token}` } : {};
+  }
+
+  function tokenQueryParam() {
+    const token = getToken();
+    return token ? `?token=${encodeURIComponent(token)}` : '';
+  }
+
+  function showAuthOverlay() {
+    authOverlay.hidden = false;
+    authOverlay.classList.remove('hiding');
+    logoutBtn.hidden = true;
+    authUsername.focus();
+  }
+
+  function hideAuthOverlay() {
+    authOverlay.classList.add('hiding');
+    authOverlay.addEventListener('animationend', () => {
+      authOverlay.hidden = true;
+      authOverlay.classList.remove('hiding');
+    }, { once: true });
+    logoutBtn.hidden = !authEnabled;
+  }
+
+  function setAuthLoading(loading) {
+    authSubmit.disabled = loading;
+    authSubmitText.hidden = loading;
+    authSubmitSpinner.hidden = !loading;
+  }
+
+  function showAuthError(message) {
+    authError.textContent = message;
+    authError.hidden = false;
+    authError.style.animation = 'none';
+    requestAnimationFrame(() => {
+      authError.style.animation = '';
+    });
+    authPassword.classList.add('error');
+    authUsername.classList.add('error');
+  }
+
+  function clearAuthError() {
+    authError.hidden = true;
+    authPassword.classList.remove('error');
+    authUsername.classList.remove('error');
+  }
+
+  authForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    clearAuthError();
+    const username = authUsername.value.trim();
+    const password = authPassword.value;
+    if (!username || !password) return;
+
+    setAuthLoading(true);
+    try {
+      const resp = await fetch(`${API}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        showAuthError(err.detail || 'Invalid credentials');
+        return;
+      }
+      const data = await resp.json();
+      setToken(data.token);
+      hideAuthOverlay();
+      startApp();
+    } catch {
+      showAuthError('Connection error. Please try again.');
+    } finally {
+      setAuthLoading(false);
+    }
+  });
+
+  authForm.addEventListener('input', () => clearAuthError());
+
+  authPwToggle.addEventListener('click', () => {
+    const isText = authPassword.type === 'text';
+    authPassword.type = isText ? 'password' : 'text';
+    authPwToggle.querySelector('svg').innerHTML = isText
+      ? '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>'
+      : '<path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/>';
+  });
+
+  logoutBtn.addEventListener('click', () => {
+    clearToken();
+    stopPolling();
+    showAuthOverlay();
+    authForm.reset();
+  });
 
   // --------------- Toast System ---------------
   function showToast(message, type = 'info') {
@@ -160,8 +292,16 @@
   }
 
   // --------------- API Calls ---------------
+  function handleUnauthorized() {
+    clearToken();
+    stopPolling();
+    showAuthOverlay();
+    authForm.reset();
+  }
+
   async function apiGet(path) {
-    const resp = await fetch(`${API}${path}`);
+    const resp = await fetch(`${API}${path}`, { headers: authHeaders() });
+    if (resp.status === 401) { handleUnauthorized(); throw new Error('Not authenticated'); }
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
       throw new Error(err.detail || `HTTP ${resp.status}`);
@@ -172,9 +312,10 @@
   async function apiPost(path, body) {
     const resp = await fetch(`${API}${path}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify(body),
     });
+    if (resp.status === 401) { handleUnauthorized(); throw new Error('Not authenticated'); }
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
       throw new Error(err.detail || `HTTP ${resp.status}`);
@@ -183,7 +324,8 @@
   }
 
   async function apiDelete(path) {
-    const resp = await fetch(`${API}${path}`, { method: 'DELETE' });
+    const resp = await fetch(`${API}${path}`, { method: 'DELETE', headers: authHeaders() });
+    if (resp.status === 401) { handleUnauthorized(); throw new Error('Not authenticated'); }
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
       throw new Error(err.detail || `HTTP ${resp.status}`);
@@ -524,7 +666,7 @@
         ${isAudio ? `<button class="library-file-play" data-file="${filePath}" title="Play" aria-label="Play ${name}">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>
         </button>` : ''}
-        <a class="library-file-download" href="${API}/files/${filePath}" download title="Download" aria-label="Save ${name}">
+        <a class="library-file-download" href="${API}/files/${filePath}${tokenQueryParam()}" download title="Download" aria-label="Save ${name}">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
         </a>
       </div>`;
@@ -532,7 +674,7 @@
 
   // --------------- Audio Player ---------------
   function playFile(filePath, name) {
-    audioEl.src = `${API}/files/${filePath}`;
+    audioEl.src = `${API}/files/${filePath}${tokenQueryParam()}`;
     audioEl.play();
     playerTitle.textContent = name || 'Unknown';
     playerArtist.textContent = '';
@@ -724,15 +866,43 @@
   });
 
   // --------------- Init ---------------
-  function init() {
+  function startApp() {
     renderHistory();
     updateBadge();
 
-    // Check for active downloads on load
     apiGet('/downloads').then(data => {
       const active = (data.downloads || []).filter(d => d.status === 'downloading' || d.status === 'pending');
       if (active.length > 0) startPolling();
     }).catch(() => {});
+  }
+
+  async function init() {
+    // Check whether the server has auth enabled
+    try {
+      const status = await fetch(`${API}/auth/status`).then(r => r.json());
+      authEnabled = status.auth_enabled === true;
+    } catch {
+      authEnabled = false;
+    }
+
+    if (!authEnabled) {
+      // Auth not configured — go straight to app
+      authOverlay.hidden = true;
+      logoutBtn.hidden = true;
+      startApp();
+      return;
+    }
+
+    // Check existing token
+    const token = getToken();
+    if (token && !isTokenExpired(token)) {
+      hideAuthOverlay();
+      logoutBtn.hidden = false;
+      startApp();
+    } else {
+      clearToken();
+      showAuthOverlay();
+    }
   }
 
   init();
