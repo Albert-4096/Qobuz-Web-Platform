@@ -508,5 +508,7 @@ if __name__ == "__main__":
     app.add_route("/health", health_check)
 
     # Start the server using uvicorn
+    # proxy_headers=True + forwarded_allow_ips="*" ensures uvicorn trusts the
+    # Host / X-Forwarded-* headers set by NGINX, preventing 421 errors.
     logger.info(f"Starting Qobuz MCP SSE server on {host}:{port}")
-    uvicorn.run(app, host=host, port=port)
+    uvicorn.run(app, host=host, port=port, proxy_headers=True, forwarded_allow_ips="*")
