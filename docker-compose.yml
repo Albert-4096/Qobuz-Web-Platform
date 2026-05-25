@@ -14,6 +14,9 @@ services:
       - ${MUSIC_DIR}:/downloads
       # Mount backend code for hot reloading/real-time updates
       - ./backend:/app
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
     environment:
       - DOWNLOAD_DIR=/downloads
       - QOBUZ_CONFIG=/root/.config/qobuz-cli/config.ini
