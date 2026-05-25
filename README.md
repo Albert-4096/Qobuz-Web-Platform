@@ -4,8 +4,11 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![Nginx](https://img.shields.io/badge/Nginx-009639?style=for-the-badge&logo=nginx&logoColor=white)](https://nginx.org/)
 [![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![MCP](https://img.shields.io/badge/MCP-Server-blueviolet?style=for-the-badge&logo=anthropic&logoColor=white)](https://modelcontextprotocol.io/)
 
 A fully self-hosted, containerized web application that wraps `qobuz-cli` inside a modern, glassmorphism-inspired web interface. Easily search, download, play, and organize your favorite Hi-Res music from Qobuz directly in your browser—**no command line interface required on your host machine!**
+
+Now also ships a **Model Context Protocol (MCP) server**, letting AI assistants (Claude, Gemini, etc.) search Qobuz, queue downloads, and browse your library through natural language.
 
 ---
 
@@ -18,12 +21,13 @@ A fully self-hosted, containerized web application that wraps `qobuz-cli` inside
 - **📥 One-Click Downloads**: Choose your preferred audio quality (from 320kbps MP3 all the way up to Hi-Res+ 24-bit/192kHz FLAC) and start downloads directly from the browser.
 - **⏳ Real-Time Progress Tracker**: Monitor active downloads with progress bars and error reporting.
 - **🎧 Built-in Media Library & Player**: Browse downloaded albums, stream audio directly in the web browser, or download files to your local device.
+- **🤖 MCP Server**: Expose all downloader capabilities to AI assistants via the Model Context Protocol over SSE.
 
 ---
 
 ## 🏗️ Architecture Flow
 
-The system runs entirely inside a Docker Compose stack. It isolates the Python backend and `qobuz-cli` tool, exposing only the Nginx frontend to your local network.
+The system runs entirely inside a Docker Compose stack. It isolates the Python backend and `qobuz-cli` tool, exposing only the Nginx frontend and the MCP server to your local network.
 
 ```mermaid
 flowchart TD
@@ -36,12 +40,15 @@ flowchart TD
         Nginx["Nginx Container (Frontend)<br>Port 8085"]
         FastAPI["FastAPI Container (Backend)<br>Port 8000"]
         QCLI["qobuz-cli (Python Tool)"]
+        MCP["MCP Server Container<br>Port 8086 (SSE)"]
     end
 
     User([User's Browser]) <-->|Access Web UI / Port 8085| Nginx
+    AI([AI Assistant / MCP Client]) <-->|SSE / Port 8086| MCP
     Nginx <-->|Reverse Proxy API /api/*| FastAPI
     FastAPI <-->|Execute downloads| QCLI
     FastAPI <-->|Scan & Play Files| Downloads
+    MCP <-->|Proxies tool calls| FastAPI
     QCLI <-->|Authenticate & Read Config| Config
     QCLI <-->|Stream & Download Audio| QobuzAPI["Qobuz Public API"]
 ```
@@ -57,7 +64,13 @@ flowchart TD
 
 ### ⚙️ Step 1: Configure Environment Variables
 
-Create a `.env` file in the project root (it is gitignored by default):
+Create a `.env` file in the project root (it is gitignored by default). You can copy the example file as a starting point:
+
+```bash
+cp .env.example .env
+```
+
+Then edit `.env` to match your setup:
 
 ```env
 # Absolute path on the host where music will be saved (e.g. your Music library)
@@ -65,9 +78,15 @@ MUSIC_DIR=/media/music/
 
 # Port the web UI will be accessible on
 APP_PORT=8085
+
+# Port the MCP server will be accessible on
+MCP_PORT=8086
+
+# Secret token required to authenticate MCP clients (change this!)
+MCP_TOKEN=qobuz_mcp_secure_secret_token_change_me
 ```
 
-Adjust `MUSIC_DIR` to match your media library path and `APP_PORT` to any free port on your host.
+Adjust `MUSIC_DIR` to match your media library path. Set a strong, unique value for `MCP_TOKEN` — any MCP client must present this token to interact with the server.
 
 ---
 
@@ -100,6 +119,11 @@ With credentials initialized, start the services in detached mode:
 docker compose up -d --build
 ```
 
+This starts three containers:
+- **`qobuz-frontend`** — Nginx serving the web UI on `APP_PORT`
+- **`qobuz-backend`** — FastAPI backend on port 8000 (internal)
+- **`qobuz-mcp`** — MCP SSE server on `MCP_PORT`
+
 ---
 
 ### 🌐 Step 4: Access the Application
@@ -107,6 +131,65 @@ docker compose up -d --build
 Once the containers are running:
 1. Open your web browser and go to: **[http://localhost:8085](http://localhost:8085)**
 2. Start searching, downloading, and playing your music!
+
+---
+
+## 🤖 MCP Server
+
+The `qobuz-mcp` container exposes a [Model Context Protocol](https://modelcontextprotocol.io/) server over **Server-Sent Events (SSE)**. This lets any compatible AI assistant control the downloader service through natural language — searching Qobuz, queuing downloads, checking progress, and browsing your local library.
+
+### Available Tools
+
+| Tool | Description |
+|---|---|
+| `search_qobuz` | Search for tracks, albums, or artists by query |
+| `get_album_details` | Get full tracklist and quality info for an album |
+| `get_track_details` | Get metadata for a specific track |
+| `download_music` | Queue a track or album download at a chosen quality |
+| `list_downloads` | List all recent and active downloads |
+| `get_download_status` | Get detailed status and progress of a specific download |
+| `cancel_download` | Cancel a pending or active download |
+| `list_library` | Browse the local downloaded music library |
+
+### Authentication
+
+All requests to the MCP server must include the `MCP_TOKEN` secret. Clients can pass it as:
+- A `Bearer` token in the `Authorization` header
+- An `X-MCP-Token` header
+- A `token` query parameter
+
+The `/health` endpoint is publicly accessible (no token required) and can be used to verify the server is running.
+
+### Connecting an AI Client
+
+#### Claude Desktop
+
+Add the following to your `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "qobuz": {
+      "url": "http://localhost:8086/sse",
+      "headers": {
+        "Authorization": "Bearer YOUR_MCP_TOKEN"
+      }
+    }
+  }
+}
+```
+
+#### Generic MCP Client (SSE endpoint)
+
+```
+SSE Endpoint:  http://localhost:8086/sse
+Auth Header:   Authorization: Bearer YOUR_MCP_TOKEN
+```
+
+Replace `YOUR_MCP_TOKEN` with the value of `MCP_TOKEN` from your `.env` file.
+
+> [!WARNING]
+> Do not expose `MCP_PORT` to the public internet without an additional layer of security (e.g. a VPN or reverse proxy with TLS). The MCP server has full control over downloads and your music library.
 
 ---
 
@@ -133,6 +216,8 @@ All runtime settings are controlled via the `.env` file in the project root:
 |---|---|---|
 | `MUSIC_DIR` | `/media/music` | Host path where downloads are saved |
 | `APP_PORT` | `8085` | Port the web UI is exposed on |
+| `MCP_PORT` | `8086` | Port the MCP SSE server is exposed on |
+| `MCP_TOKEN` | *(none)* | Secret token required by MCP clients. If unset, auth is **disabled** (not recommended) |
 
 Edit `.env` and restart the stack (`docker compose up -d`) for changes to take effect.
 
@@ -153,8 +238,16 @@ sudo chown -R $USER:$USER ~/.config/qobuz-cli
   docker compose logs -f backend
   ```
 
+### 3. MCP Server Not Responding
+- Verify the container is running: `docker compose ps`
+- Check MCP server logs: `docker compose logs -f mcp`
+- Confirm your client is sending the correct `MCP_TOKEN` value.
+- The health endpoint should return `200 OK` if the server is up:
+  ```bash
+  curl http://localhost:8086/health
+  ```
+
 ---
 
 ## ⚖️ Disclaimer
 This tool is for personal use and archiving purposes only. Please respect artists and copyright laws. You must have an active Qobuz subscription to search and download tracks.
-

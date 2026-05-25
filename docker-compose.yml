@@ -34,5 +34,22 @@ services:
     networks:
       - qobuz_net
 
+  mcp:
+    build:
+      context: ./mcp
+      dockerfile: Dockerfile
+    container_name: qobuz-mcp
+    restart: unless-stopped
+    ports:
+      - "${MCP_PORT:-8086}:8086"
+    depends_on:
+      - backend
+    environment:
+      - QOBUZ_API_URL=http://backend:8000/api
+      - MCP_TOKEN=${MCP_TOKEN}
+      - PORT=8086
+    networks:
+      - qobuz_net
+
 networks:
   qobuz_net:
