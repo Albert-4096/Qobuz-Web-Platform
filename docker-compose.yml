@@ -8,8 +8,8 @@ services:
     networks:
       - qobuz_net
     volumes:
-      # Mount the host qobuz-cli config (read-only)
-      - ${HOME}/.config/qobuz-cli:/root/.config/qobuz-cli:ro
+      # Mount the host qobuz-cli config (writable for archive db and cache)
+      - ${HOME}/.config/qobuz-cli:/root/.config/qobuz-cli
       # Downloads go to the path defined in .env (MUSIC_DIR)
       - ${MUSIC_DIR}:/downloads
       # Mount backend code for hot reloading/real-time updates
