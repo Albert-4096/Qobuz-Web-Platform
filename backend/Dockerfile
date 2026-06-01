@@ -2,10 +2,8 @@ FROM python:3.13-slim
 
 WORKDIR /app
 
-# Install pipx and qobuz-cli for the download functionality
-RUN pip install --no-cache-dir pipx && \
-    pipx install qobuz-cli && \
-    ln -s /root/.local/bin/qcli /usr/local/bin/qcli
+# Install qobuz-cli for the download functionality globally
+RUN pip install --no-cache-dir qobuz-cli
 
 # Install backend dependencies
 COPY requirements.txt .
@@ -14,8 +12,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy backend application
 COPY app.py .
 
-# Create downloads directory
-RUN mkdir -p /downloads
+# Create configuration and downloads directories with broad permissions
+RUN mkdir -p /config /downloads && chmod 777 /config /downloads
 
 # Expose port
 EXPOSE 8000

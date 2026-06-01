@@ -36,7 +36,7 @@ log = logging.getLogger("qobuz-service")
 QOBUZ_API_BASE = "https://www.qobuz.com/api.json/0.2/"
 DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR", "/downloads")
 CONFIG_PATH = os.environ.get(
-    "QOBUZ_CONFIG", "/root/.config/qobuz-cli/config.ini"
+    "QOBUZ_CONFIG", "/config/.config/qobuz-cli/config.ini"
 )
 
 # Quality mapping: user-friendly ID -> Qobuz format_id

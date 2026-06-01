@@ -101,7 +101,7 @@ Since this service interacts with the Qobuz API, it needs authentication tokens.
 
 2. **Run the interactive login command** inside the Docker container. This will temporarily mount the directory as read-write to save your generated config:
    ```bash
-   docker compose run --rm -v ~/.config/qobuz-cli:/root/.config/qobuz-cli:rw backend qcli login
+   docker compose run --rm -v ~/.config/qobuz-cli:/config/.config/qobuz-cli:rw -e HOME=/config -u "$(id -u):$(id -g)" backend qcli login
    ```
 
 3. **Enter your Qobuz email and password** when prompted. The tool will authenticate with Qobuz, fetch the required API keys/tokens, and save a `config.ini` file into `~/.config/qobuz-cli/config.ini`.

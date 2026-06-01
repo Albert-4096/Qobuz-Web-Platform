@@ -5,11 +5,12 @@ services:
       dockerfile: Dockerfile
     container_name: qobuz-backend
     restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
     networks:
       - qobuz_net
     volumes:
       # Mount the host qobuz-cli config (writable for archive db and cache)
-      - ${HOME}/.config/qobuz-cli:/root/.config/qobuz-cli
+      - ${HOME}/.config/qobuz-cli:/config/.config/qobuz-cli
       # Downloads go to the path defined in .env (MUSIC_DIR)
       - ${MUSIC_DIR}:/downloads
       # Mount backend code for hot reloading/real-time updates
@@ -19,7 +20,8 @@ services:
       - 8.8.4.4
     environment:
       - DOWNLOAD_DIR=/downloads
-      - QOBUZ_CONFIG=/root/.config/qobuz-cli/config.ini
+      - QOBUZ_CONFIG=/config/.config/qobuz-cli/config.ini
+      - HOME=/config
       - APP_USERNAME=${APP_USERNAME:-}
       - APP_PASSWORD=${APP_PASSWORD:-}
       - JWT_SECRET=${JWT_SECRET:-}
