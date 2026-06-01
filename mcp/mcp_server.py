@@ -523,13 +523,14 @@ class TokenAuthMiddleware:
         if not req_token or req_token != self.token:
             client = scope.get("client") or ("unknown", 0)
             logger.warning(f"Unauthorized request from {client[0]}: {method} {path}")
-            body = b"401 Unauthorized: Invalid or missing bearer token"
+            body = b'{"error":"invalid_token","error_description":"Invalid or missing bearer token"}'
             await send({
                 "type": "http.response.start",
                 "status": 401,
                 "headers": [
-                    (b"content-type", b"text/plain"),
+                    (b"content-type", b"application/json"),
                     (b"content-length", str(len(body)).encode()),
+                    (b"www-authenticate", b'Bearer realm="qobuz-mcp"'),
                 ],
             })
             await send({"type": "http.response.body", "body": body, "more_body": False})
