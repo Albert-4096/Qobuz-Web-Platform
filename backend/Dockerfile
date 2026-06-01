@@ -2,6 +2,10 @@ FROM python:3.13-slim
 
 WORKDIR /app
 
+# Set default environment variables
+ENV HOME=/config
+ENV XDG_CONFIG_HOME=/config/.config
+
 # Install gosu and qobuz-cli
 RUN apt-get update && apt-get install -y --no-install-recommends gosu && \
     rm -rf /var/lib/apt/lists/* && \
